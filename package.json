@@ -1,0 +1,12 @@
+{
+  "name": "quiz-dash",
+  "version": "1.0.0",
+  "description": "Real-time multiplayer trivia party game",
+  "main": "server.js",
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  }
+}
