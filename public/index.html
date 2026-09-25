@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Quiz Dash</title>
+<style>
+  :root{ --bg:#111827; --card:#1f2937; --text:#f3f4f6; --accent:#6366f1; --ok:#22c55e; --bad:#ef4444; --muted:#9ca3af; }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{ background:var(--bg); color:var(--text); font-family:system-ui,sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom));
+    display:flex; align-items:center; justify-content:center; min-height:100vh; }
+  #app{ width:100%; max-width:480px; }
+  .card{ background:var(--card); border-radius:16px; padding:24px; }
+  h1{ font-size:28px; margin:0 0 8px; }
+  h2{ font-size:20px; margin:0 0 16px; }
+  p.sub{ color:var(--muted); margin-top:0; }
+  input, button{ font-size:16px; border-radius:10px; border:none; padding:12px 16px; width:100%; margin-top:8px; }
+  input{ background:#111827; color:var(--text); border:1px solid #374151; }
+  button{ background:var(--accent); color:white; font-weight:600; cursor:pointer; }
+  button:disabled{ opacity:.5; cursor:not-allowed; }
+  button.secondary{ background:#374151; }
+  .player-list{ list-style:none; padding:0; margin:16px 0; }
+  .player-list li{ display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid #374151; }
+  .code{ font-size:36px; font-weight:800; letter-spacing:4px; text-align:center; margin:8px 0 16px; }
+  .timerbar{ height:8px; background:#374151; border-radius:4px; overflow:hidden; margin-bottom:16px; }
+  .timerfill{ height:100%; background:var(--accent); transition: width 0.2s linear; }
+  .opt{ display:block; text-align:left; background:#111827; border:2px solid #374151; margin-top:10px; }
+  .opt.selected{ border-color:var(--accent); }
+  .opt.correct{ border-color:var(--ok); background:#052e12; }
+  .opt.incorrect{ border-color:var(--bad); background:#2e0505; }
+  .lb-row{ display:flex; justify-content:space-between; padding:10px 0; border-bottom:1px solid #374151; }
+  .lb-row.me{ color:#a5b4fc; font-weight:700; }
+  .muted{ color:var(--muted); font-size:14px; }
+  .banner{ text-align:center; font-size:14px; color:var(--muted); margin-top:12px; }
+</style>
+</head>
+<body>
+<div id="app"><div class="card"><p>Connecting…</p></div></div>
+
+<script>
+let ws = null;
+let roomCode = null;
+let playerId = null;
+let latestState = null;
+let answerLocked = false;
+let tickTimer = null;
+
+function wsUrl(){
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return proto + "//" + location.host;
+}
+
+function connect(){
+  ws = new WebSocket(wsUrl());
+  ws.onopen = () => showHome();
+  ws.onclose = () => render(`<h2>Disconnected</h2><p class="sub">Connection to the server was lost.</p><button onclick="location.reload()">Reconnect</button>`);
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    if(msg.type === "joined"){
+      roomCode = msg.roomCode; playerId = msg.playerId;
+      try{ localStorage.setItem("quizdash_pid_"+roomCode, playerId); }catch(e){}
+    } else if(msg.type === "state"){
+      answerLocked = false;
+      latestState = msg.state;
+      renderRoom(msg.state);
+    } else if(msg.type === "error"){
+      alert(msg.message);
+    }
+  };
+}
+
+const app = document.getElementById("app");
+function render(html){ app.innerHTML = '<div class="card">'+html+'</div>'; }
+
+function showHome(){
+  render(`
+    <h1>🎯 Quiz Dash</h1>
+    <p class="sub">Fast-paced trivia for 2–8 players.</p>
+    <input id="hostName" placeholder="Your name" maxlength="16">
+    <button id="hostBtn">Host a Game</button>
+    <div style="margin-top:16px;">
+      <input id="joinCode" placeholder="Room code" maxlength="4" style="text-transform:uppercase;">
+      <input id="joinName" placeholder="Your name" maxlength="16">
+      <button id="joinBtn" class="secondary">Join a Game</button>
+    </div>
+    <p class="banner">How to play: answer fast for bonus points. 10 questions. Highest score wins.</p>
+  `);
+  document.getElementById("hostBtn").onclick = () => {
+    const name = document.getElementById("hostName").value.trim() || "Host";
+    ws.send(JSON.stringify({ type: "host", name }));
+  };
+  document.getElementById("joinBtn").onclick = () => {
+    const code = document.getElementById("joinCode").value.trim().toUpperCase();
+    const name = document.getElementById("joinName").value.trim() || "Player";
+    if(code.length !== 4){ alert("Enter a 4-character room code."); return; }
+    let pid = null;
+    try{ pid = localStorage.getItem("quizdash_pid_"+code); }catch(e){}
+    ws.send(JSON.stringify({ type: "join", roomCode: code, name, playerId: pid }));
+  };
+}
+
+function renderRoom(state){
+  clearInterval(tickTimer);
+  if(state.status === "lobby") return renderLobby(state);
+  if(state.status === "countdown") return render(`<h2 style="text-align:center;">Get ready…</h2><div class="code">🎯</div>`);
+  if(state.status === "question") return renderQuestion(state);
+  if(state.status === "reveal") return renderReveal(state);
+  if(state.status === "leaderboard") return renderLeaderboard(state);
+  if(state.status === "final") return renderFinal(state);
+}
+
+function renderLobby(state){
+  const isHost = state.hostId === playerId;
+  const players = Object.entries(state.players);
+  render(`
+    <h2>Lobby</h2>
+    <div class="code">${state.code}</div>
+    <p class="sub" style="text-align:center;">Share this code — players join at this same URL.</p>
+    <ul class="player-list">${players.map(([id,p])=>`<li>${p.name}${id===state.hostId?" 👑":""}${id===playerId?" (you)":""}</li>`).join("")}</ul>
+    <p class="muted">${players.length}/8 players</p>
+    ${isHost
+      ? `<button id="startBtn" ${players.length<2?"disabled":""}>Start Game</button>`
+      : `<p class="banner">Waiting for host to start…</p>`}
+    <p class="banner">How to play: 10 questions, 15 seconds each. Faster correct answers earn more points.</p>
+  `);
+  if(isHost) document.getElementById("startBtn").onclick = () => ws.send(JSON.stringify({ type: "start" }));
+}
+
+function renderQuestion(state){
+  const q = state.question;
+  render(`
+    <p class="muted">Question ${state.questionIndex+1} of ${state.totalQuestions}</p>
+    <div class="timerbar"><div class="timerfill" id="timerfill" style="width:100%;"></div></div>
+    <h2>${q.q}</h2>
+    ${q.opts.map((opt,i)=>`<button class="opt ${state.myAnswer&&state.myAnswer.choice===i?"selected":""}" data-i="${i}" ${state.myAnswer?"disabled":""}>${opt}</button>`).join("")}
+    <p class="banner">${state.myAnswer ? "Answer locked — waiting for others…" : "Tap an answer before time runs out."}</p>
+    <p class="muted" style="text-align:center;">${state.answeredIds.length}/${Object.keys(state.players).filter(id=>state.players[id].connected).length} answered</p>
+  `);
+  if(!state.myAnswer){
+    document.querySelectorAll(".opt").forEach(btn=>{
+      btn.onclick = () => {
+        if(answerLocked) return;
+        answerLocked = true;
+        const i = parseInt(btn.dataset.i);
+        ws.send(JSON.stringify({ type: "answer", choice: i }));
+      };
+    });
+  }
+  const fill = document.getElementById("timerfill");
+  function tick(){
+    const elapsed = Date.now() - state.questionStartAt;
+    const pct = Math.max(0, 100 - (elapsed/state.questionMs)*100);
+    if(fill) fill.style.width = pct + "%";
+    if(elapsed >= state.questionMs) clearInterval(tickTimer);
+  }
+  tickTimer = setInterval(tick, 200);
+  tick();
+}
+
+function renderReveal(state){
+  const q = state.question;
+  const myAnswer = state.myAnswer;
+  const myGain = state.players[playerId]?.lastGain || 0;
+  render(`
+    <p class="muted">Question ${state.questionIndex+1} of ${state.totalQuestions}</p>
+    <h2>${q.q}</h2>
+    ${q.opts.map((opt,i)=>{
+      let cls = "opt";
+      if(i===q.correct) cls += " correct";
+      else if(myAnswer && myAnswer.choice===i) cls += " incorrect";
+      return `<div class="${cls}" style="padding:12px 16px; border-radius:10px; margin-top:10px;">${opt}</div>`;
+    }).join("")}
+    <p class="banner">${myGain>0 ? `+${myGain} points!` : "No points this round"}</p>
+  `);
+}
+
+function renderLeaderboard(state){
+  const ranked = Object.entries(state.players).sort((a,b)=>(b[1].score||0)-(a[1].score||0));
+  render(`
+    <h2>Leaderboard</h2>
+    ${ranked.map(([id,p],i)=>`<div class="lb-row ${id===playerId?"me":""}"><span>#${i+1} ${p.name}${id===playerId?" (you)":""}</span><span>${p.score||0}</span></div>`).join("")}
+    <p class="banner">Next question coming up…</p>
+  `);
+}
+
+function renderFinal(state){
+  const isHost = state.hostId === playerId;
+  const ranked = Object.entries(state.players).sort((a,b)=>(b[1].score||0)-(a[1].score||0));
+  const topScore = ranked[0]?.[1].score || 0;
+  const winners = ranked.filter(([,p])=>p.score===topScore).map(([,p])=>p.name);
+  render(`
+    <h2>🏆 Final Results</h2>
+    <p class="sub">${winners.join(" & ")} ${winners.length>1?"tie for":"wins with"} ${topScore} points!</p>
+    ${ranked.map(([id,p],i)=>`<div class="lb-row ${id===playerId?"me":""}"><span>#${i+1} ${p.name}${id===playerId?" (you)":""}</span><span>${p.score||0}</span></div>`).join("")}
+    ${isHost ? `<button id="againBtn">Play Again</button>` : `<p class="banner">Waiting for host to restart…</p>`}
+  `);
+  if(isHost) document.getElementById("againBtn").onclick = () => ws.send(JSON.stringify({ type: "playAgain" }));
+}
+
+connect();
+</script>
+</body>
+</html>
